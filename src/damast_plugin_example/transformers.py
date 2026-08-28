@@ -4,6 +4,7 @@ Example damast plugin transformer.
 This module is what the ``damast.transformers`` entry-point in pyproject.toml points at -
 see :class:`MMSIPatternClassifier` and the package README.
 """
+import re
 from pathlib import Path
 
 import polars
@@ -21,23 +22,27 @@ def load_pattern_rules(mapping_file: str | Path) -> dict[str, str]:
     Example:
         ```yaml
         # mmsi_categories.yaml - see examples/mmsi_categories.yaml for the full set of
-        # patterns defined in Recommendation ITU-R M.585-10
-        "111": sar-aircraft                      # Annex 1, Section 3: 111-MID-XXX
-        "98": craft-associated-with-parent-ship  # Annex 1, Section 5: 98-MID-XXXX
-        "99": aid-to-navigation                  # Annex 1, Section 4: 99-MID-XXXX
-        "009990000": all-coast-stations          # Annex 1, Section 2 §8: fixed identity
+        # patterns defined in Recommendation ITU-R M.585-10. More specific patterns are
+        # listed before the more general ones they would otherwise shadow.
+        '00(?P<mid>\\d{3})1': coast-station      # Annex 1, S2 §3a: 00-MID-1XXX
+        '00': coast-station                      # Annex 1, S2 §1:  00-MID-XXXX (generic)
+        '111': sar-aircraft                      # Annex 1, S3 §1:  111-MID-XXX
+        '009990000': all-coast-stations          # Annex 1, S2 §8:  fixed identity
         ```
 
     Args:
-        mapping_file: Path to a YAML file mapping MMSI patterns to category labels. A
-            pattern is matched as a leading-digits prefix, so it can be as short as a single
-            digit (e.g. ``"9"``) or as long as a full 9-digit MMSI, in which case it only
-            matches that one exact number. Patterns are matched longest-first, so a more
-            specific one (e.g. ``"111"``, or a full 9-digit pattern) takes precedence over a
-            shorter, more general one (e.g. ``"1"``).
+        mapping_file: Path to a YAML file mapping MMSI patterns to category labels. Each
+            pattern is a regular expression (standard `re` syntax, including named groups
+            like `(?P<mid>...)`) matched against the start of the (9-digit) MMSI - it does not
+            need to match the whole string, so `"111"` matches any MMSI starting with those
+            three digits. Patterns are tried in the order they appear in the file and the
+            *first* match wins - unlike a plain prefix, a longer/more specific regex does not
+            automatically take precedence, so a pattern that is a special case of an earlier,
+            more general one (e.g. `'00(?P<mid>\\d{3})1'` vs `'00'`) must be listed *before*
+            it, or it will never be reached.
 
     Returns:
-        Mapping of pattern (as string) to category label
+        Mapping of pattern (as string) to category label, in file order
 
     Raises:
         FileNotFoundError: If `mapping_file` does not exist
@@ -72,20 +77,34 @@ class MMSIPatternClassifier(PipelineElement):
         ```
 
     Args:
-        mapping_file: YAML file mapping MMSI patterns to category labels - see
+        mapping_file: YAML file mapping MMSI patterns (regexes) to category labels - see
             `load_pattern_rules`. Re-read every time the transformer is constructed, including
             when a saved pipeline using it is loaded elsewhere, so keep it alongside the
             pipeline (or use an absolute path)
         default_category: Category assigned to a MMSI that matches no rule in `mapping_file`
+
+    Raises:
+        ValueError: If `mapping_file` contains a pattern that is not a valid regular
+            expression
     """
 
     def __init__(self, mapping_file: str | Path, default_category: str = "unknown"):
         self.mapping_file = str(mapping_file)
         self.default_category = default_category
         self._rules = load_pattern_rules(mapping_file)
-        # match the most specific (longest) pattern first - a full 9-digit pattern therefore
-        # takes precedence over any shorter pattern it happens to also start with
-        self._patterns_by_specificity = sorted(self._rules, key=len, reverse=True)
+        # tried in file order - first match wins, see load_pattern_rules
+        self._compiled_patterns: list[tuple[re.Pattern, str]] = []
+        for pattern, category in self._rules.items():
+            try:
+                # wrapped in a non-capturing group so e.g. a top-level '|' in the pattern
+                # doesn't escape the '^' anchor
+                compiled = re.compile(r"^(?:" + pattern + r")")
+            except re.error as e:
+                raise ValueError(
+                    f"{self.__class__.__name__}: invalid regex pattern {pattern!r} in "
+                    f"'{self.mapping_file}': {e}"
+                ) from e
+            self._compiled_patterns.append((compiled, category))
 
     def _categorize(self, mmsi: int | None) -> str:
         if mmsi is None:
@@ -96,9 +115,9 @@ class MMSIPatternClassifier(PipelineElement):
         # matching patterns, or those two categories (and the all-coast-stations identity)
         # could never match.
         mmsi_str = str(mmsi).zfill(9)
-        for pattern in self._patterns_by_specificity:
-            if mmsi_str.startswith(pattern):
-                return self._rules[pattern]
+        for pattern, category in self._compiled_patterns:
+            if pattern.match(mmsi_str):
+                return category
 
         return self.default_category
 

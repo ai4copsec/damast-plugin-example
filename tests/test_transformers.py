@@ -9,21 +9,28 @@ from damast.core.transformations import PluginManager
 
 from damast_plugin_example.transformers import MMSIPatternClassifier, load_pattern_rules
 
+# Declaration order matters (first match wins) - see MMSIPatternClassifier. "009990000" must
+# precede "00", which must precede "0", or the more specific rules are never reached.
 MAPPING = {
+    "009990000": "all-coast-stations",
+    "00": "coast-station",
+    "0": "group-ship-call",
     "111": "SAR",
     "98": "craft-associated-with-parent-ship",
     "99": "aid-to-navigation",
-    "00": "coast-station",
-    "009990000": "all-coast-stations",
-    "0": "group-ship-call",
 }
+
+
+def write_mapping_file(path, mapping):
+    # single-quoted, so a pattern containing a regex backslash escape (e.g. '\d') is not
+    # mistaken by YAML for one of its own (unsupported) escape sequences
+    path.write_text("\n".join(f"'{pattern}': {category}" for pattern, category in mapping.items()))
+    return path
 
 
 @pytest.fixture
 def mapping_file(tmp_path):
-    path = tmp_path / "mmsi_categories.yaml"
-    path.write_text("\n".join(f'"{pattern}": {category}' for pattern, category in MAPPING.items()))
-    return path
+    return write_mapping_file(tmp_path / "mmsi_categories.yaml", MAPPING)
 
 
 @pytest.fixture
@@ -48,7 +55,7 @@ def test_load_pattern_rules(mapping_file):
     assert load_pattern_rules(mapping_file) == MAPPING
 
 
-def test_classifies_by_longest_matching_pattern(adf, mapping_file, tmp_path):
+def test_classifies_by_first_matching_pattern_in_file_order(adf, mapping_file, tmp_path):
     pipeline = DataProcessingPipeline(name="example", base_dir=str(tmp_path))
     pipeline.add("classify mmsi",
                  MMSIPatternClassifier(mapping_file=mapping_file),
@@ -69,6 +76,57 @@ def test_custom_default_category(adf, mapping_file, tmp_path):
 
     result = pipeline.transform(df=adf)
     assert result.lazyframe.collect()["mmsi_category"].to_list()[-1] == "ship"
+
+
+def test_named_group_lets_a_more_specific_rule_take_precedence(tmp_path):
+    # a coast station whose optional 6th digit is "1" (Annex 1 S2 §3a) should be reported as
+    # "coast-station-proper", but any other 6th digit falls through to the generic
+    # "coast-station" rule - only possible because the specific rule is listed first
+    mapping_file = write_mapping_file(tmp_path / "mmsi_categories.yaml", {
+        r"00(?P<mid>\d{3})1": "coast-station-proper",
+        "00": "coast-station",
+    })
+    df = polars.DataFrame({"mmsi": [2351234, 2359234]})  # 002351234, 002359234
+    metadata = MetaData(columns=[DataSpecification("mmsi", representation_type=int)])
+    adf = AnnotatedDataFrame(df, metadata)
+
+    pipeline = DataProcessingPipeline(name="example", base_dir=str(tmp_path))
+    pipeline.add("classify mmsi",
+                 MMSIPatternClassifier(mapping_file=mapping_file),
+                 name_mappings={"x": "mmsi"})
+
+    result = pipeline.transform(df=adf)
+    assert result.lazyframe.collect()["mmsi_category"].to_list() == [
+        "coast-station-proper", "coast-station",
+    ]
+
+
+def test_a_pattern_listed_after_a_more_general_one_is_shadowed(tmp_path):
+    # same two rules as above, but in the wrong order - the specific rule can now never be
+    # reached, since the general "00" rule always matches first; this is the documented
+    # trade-off of first-match-wins over automatic longest-match
+    mapping_file = write_mapping_file(tmp_path / "mmsi_categories.yaml", {
+        "00": "coast-station",
+        r"00(?P<mid>\d{3})1": "coast-station-proper",
+    })
+    df = polars.DataFrame({"mmsi": [2351234]})  # 002351234 - would be "coast-station-proper"
+    metadata = MetaData(columns=[DataSpecification("mmsi", representation_type=int)])
+    adf = AnnotatedDataFrame(df, metadata)
+
+    pipeline = DataProcessingPipeline(name="example", base_dir=str(tmp_path))
+    pipeline.add("classify mmsi",
+                 MMSIPatternClassifier(mapping_file=mapping_file),
+                 name_mappings={"x": "mmsi"})
+
+    result = pipeline.transform(df=adf)
+    assert result.lazyframe.collect()["mmsi_category"].to_list() == ["coast-station"]
+
+
+def test_invalid_pattern_raises_value_error(tmp_path):
+    mapping_file = write_mapping_file(tmp_path / "mmsi_categories.yaml", {"(": "broken"})
+
+    with pytest.raises(ValueError, match=r"invalid regex pattern"):
+        MMSIPatternClassifier(mapping_file=mapping_file)
 
 
 def test_discoverable_as_a_damast_plugin():

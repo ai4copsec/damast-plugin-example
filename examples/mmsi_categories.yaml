@@ -4,32 +4,59 @@
 # the maritime mobile service":
 # https://www.itu.int/dms_pubrec/itu-r/rec/m/R-REC-M.585-10-202604-I!!PDF-E.pdf
 #
-# A pattern is matched as a leading-digits prefix of the (9-digit) MMSI, longest match wins.
-# Most categories in Annex 1/2 are a fixed prefix followed by the 3-digit Maritime
-# Identification Digits (MID) of the assigning administration and/or a serial number - the
-# prefix alone identifies the category regardless of which MID follows. A pattern can also be
-# a full 9 digits, in which case it only matches that one exact MMSI - see
-# "all-coast-stations" below. A plain ship station has no such fixed pattern (its first 3
-# digits *are* the MID, Annex 1 S1), so it is left unmapped here and falls back to
-# `default_category` - see examples/run_pipeline.py.
+# Each pattern is a regular expression (standard `re` syntax, including named groups like
+# '(?P<mid>...)') matched against the start of the (9-digit) MMSI - see
+# MMSIPatternClassifier/load_pattern_rules for the exact semantics. Single-quote every
+# pattern: YAML double-quoted strings only support a small, fixed set of backslash escapes
+# and choke on '\d' - single-quoted strings pass it through unchanged.
 #
-# Quote every pattern - unquoted, YAML would parse a leading-zero pattern like "00" as an
-# octal number rather than the string "00".
+# IMPORTANT - patterns are tried top-to-bottom and the FIRST match wins, unlike a plain
+# prefix table where the longest/most specific match automatically wins. A pattern that is a
+# special case of a later, more general one MUST be listed first, or it is never reached -
+# e.g. the 6th-digit-differentiated coast-station patterns below must precede the plain '00'
+# they are all special cases of, and '0' (group-ship-call) must come after every '00...'
+# pattern, since it would otherwise swallow all of them.
 #
-# "0" and "00" don't collide in practice: MMSIPatternClassifier matches the longest pattern
-# first, so a coast station (00-MID-XXXX) always matches "00" before "0" - and even without
-# that, every ITU-assigned MID starts with a digit 2-7, so a genuine group-ship-call number's
-# second digit is never 0 in the first place.
-"0": group-ship-call                     # Annex 1, Section 1 §4:  0-MID-XXXX
-"00": coast-station                      # Annex 1, Section 2 §1:  00-MID-XXXX
-"009990000": all-coast-stations          # Annex 1, Section 2 §8:  fixed identity, not a MID
-                                          # range - reserved to address every 00MIDXXXX
-                                          # station (VHF only)
-"111": sar-aircraft                      # Annex 1, Section 3 §1:  111-MID-XXX
-"98": craft-associated-with-parent-ship  # Annex 1, Section 5 §1:  98-MID-XXXX
-"99": aid-to-navigation                  # Annex 1, Section 4 §1:  99-MID-XXXX
-"8": handheld-vhf-transceiver            # Annex 2, Section 1 §3:  8-MID-XXXXX
-"970": ais-sart                          # Annex 2, Section 2 §1:  970-XXYYYY
-"972": man-overboard-device              # Annex 2, Section 2 §2:  972-XXYYYY
-"974": epirb-ais                         # Annex 2, Section 2 §3:  974-XXYYYY
-"979": amrd-group-b                      # Annex 2, Section 2 §5.2: 979-YYYYYY
+# A plain ship station has no fixed pattern at all (its first 3 digits *are* the MID, Annex 1
+# S1), so it is left unmapped here and falls back to `default_category` - see
+# examples/run_pipeline.py.
+
+# --- coast stations (Annex 1, Section 2) ----------------------------------------------------
+# the 6th digit differentiating specific coast-station uses is optional (S2 §2-3) - an
+# administration not using it, or any 6th-digit value other than 1-5, falls through to the
+# generic 'coast-station' rule below
+'009990000': all-coast-stations                  # S2 §8:  fixed identity, not a MID range -
+                                                  #         reserved to address every
+                                                  #         00MIDXXXX station (VHF only)
+'00(?P<mid>\d{3})1': coast-station                # S2 §3a: 00-MID-1XXX
+'00(?P<mid>\d{3})2': port-station                 # S2 §3b: 00-MID-2XXX (harbour radio)
+'00(?P<mid>\d{3})3': pilot-station                # S2 §3c: 00-MID-3XXX
+'00(?P<mid>\d{3})4': ais-repeater-station          # S2 §3d: 00-MID-4XXX
+'00(?P<mid>\d{3})5': ais-base-station              # S2 §3e: 00-MID-5XXX (VDL controlling)
+'00': coast-station                               # S2 §1:  00-MID-XXXX (generic)
+
+# --- group ship call (Annex 1, Section 1) - must follow every '00...' rule above ------------
+'0': group-ship-call                              # S1 §4:  0-MID-XXXX
+
+# --- SAR aircraft (Annex 1, Section 3) -------------------------------------------------------
+# the 7th-digit differentiation is likewise optional (S3 §3)
+'111(?P<mid>\d{3})1': sar-aircraft-fixed-wing     # S3 §3a: 111-MID-1XX
+'111(?P<mid>\d{3})5': sar-aircraft-helicopter     # S3 §3b: 111-MID-5XX
+'111': sar-aircraft                               # S3 §1:  111-MID-XXX (generic)
+
+# --- craft associated with a parent ship (Annex 1, Section 5) -------------------------------
+'98': craft-associated-with-parent-ship           # S5 §1:  98-MID-XXXX
+
+# --- aids to navigation (Annex 1, Section 4) -------------------------------------------------
+# the 6th-digit differentiation is likewise optional (S4 §5)
+'99(?P<mid>\d{3})1': aid-to-navigation-physical   # S4 §5a: 99-MID-1XXX
+'99(?P<mid>\d{3})6': aid-to-navigation-virtual    # S4 §5b: 99-MID-6XXX
+'99(?P<mid>\d{3})8': aid-to-navigation-mobile     # S4 §5c: 99-MID-8XXX
+'99': aid-to-navigation                           # S4 §1:  99-MID-XXXX (generic)
+
+# --- other maritime devices (Annex 2) --------------------------------------------------------
+'8': handheld-vhf-transceiver                     # Annex 2, S1 §3:   8-MID-XXXXX
+'970': ais-sart                                   # Annex 2, S2 §1: 970-XXYYYY
+'972': man-overboard-device                       # Annex 2, S2 §2: 972-XXYYYY
+'974': epirb-ais                                  # Annex 2, S2 §3: 974-XXYYYY
+'979': amrd-group-b                               # Annex 2, S2 §5.2: 979-YYYYYY
