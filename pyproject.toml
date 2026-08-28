@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "damast-plugin-example"
+version = "0.1.0"
+description = "Template for an installable damast plugin package - a PipelineElement transformer registered via the damast.transformers entry-point"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "Thomas Roehr", email = "roehr@simula.no" },
+]
+dependencies = [
+    "damast",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+# This is what makes MMSIPatternClassifier discoverable as a damast plugin - by
+# `damast plugins`, PipelineElement.list_plugins(), and `from damast.plugins
+# import MMSIPatternClassifier` - once this package is installed. See README.md.
+[project.entry-points."damast.transformers"]
+MMSIPatternClassifier = "damast_plugin_example.transformers:MMSIPatternClassifier"
+
+[tool.setuptools.packages.find]
+where = ["src"]
